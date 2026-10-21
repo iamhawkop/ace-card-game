@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ACE Card Game</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:12px}
+.game-container{background:rgba(0,0,0,.62);padding:18px;border-radius:15px;box-shadow:0 8px 32px #0008;text-align:center;max-width:720px;width:100%}
+h1{font-size:1.6rem;margin:0 0 12px}
+.scores,.penalty-area{display:flex;justify-content:space-around;gap:8px;flex-wrap:wrap;font-size:14px;margin:10px 0;background:#0005;padding:10px;border-radius:8px}
+.status-box{font-size:15px;margin:12px 0;min-height:44px;background:#ffffff1a;padding:10px;border-radius:6px;line-height:1.45}
+.table-area{background:#0064004d;border:2px dashed #4caf50;border-radius:10px;padding:15px;margin:12px 0;min-height:105px;display:flex;flex-wrap:wrap;justify-content:center;gap:10px;align-items:center}
+.cards-hand{display:flex;justify-content:center;gap:7px;margin:15px 0;flex-wrap:wrap}
+.card{background:#fff;color:#111;width:48px;height:70px;border-radius:6px;display:flex;flex-direction:column;justify-content:space-between;padding:5px;font-weight:700;font-size:14px;box-shadow:0 4px 8px #0005;cursor:pointer;user-select:none}
+.card:hover{transform:translateY(-3px);background:#fffde7}.card.red{color:#d32f2f}
+.card:focus-visible,button:focus-visible{outline:3px solid #ffdf57;outline-offset:2px}
+button{background:#4caf50;border:0;color:#fff;padding:11px 20px;font-size:15px;border-radius:6px;cursor:pointer;margin-top:5px}
+button:hover{background:#45a049}
+.small{font-size:12px;opacity:.88;line-height:1.5}
+.penalty-player{min-width:120px;flex:1}
+.penalty-cards{font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.safe{color:#a5f3b0}
+@media(max-width:420px){.game-container{padding:12px}.card{width:41px;height:62px;padding:4px;font-size:12px}.scores,.penalty-area{font-size:12px}}
+</style>
+</head>
+<body>
+<main class="game-container">
+<h1>ACE Card Game</h1>
+<div class="scores">
+<div>You: <strong id="p0-count">18</strong> cards</div>
+<div>CPU 1: <strong id="p1-count">17</strong> cards</div>
+<div>CPU 2: <strong id="p2-count">17</strong> cards</div>
+<div>Discard pile: <strong id="bin-count">0</strong> cards</div>
+</div>
+<div class="status-box" id="message" role="status" aria-live="polite">Tap Start New Game to begin.</div>
+<div>Round Table (Played Cards)</div>
+<div class="table-area" id="table-cards"><em>No cards played yet this round.</em></div>
+<div>Your Hand</div>
+<div class="cards-hand" id="player-hand"></div>
+<button id="start-btn" type="button">Start New Game</button>
+<h3>Loss Penalties — carried into the next game</h3>
+<div class="penalty-area" id="penalty-area"></div>
+<p class="small">Safety rule: the first player to empty their hand is safe and stops playing. The game continues among the remaining players. The last player with cards loses and receives the next penalty card in this order: A♠, A♣, A♥, A♦, then K♠, K♣, K♥, K♦, continuing rank by rank down to 2♦. Penalty cards remain in their owner's playable hand in the next game. Each penalty card causes its owner to skip one dealing turn; the penalty card is counted once and is not duplicated.</p>
+</main>
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const suits=["♠","♥","♦","♣"];
+const penaltySequence=[];
+for(let val=14;val>=2;val--)for(const suit of ["♠","♣","♥","♦"])penaltySequence.push({val,display:getCardName(val),suit,red:suit==="♥"||suit==="♦"});
+let deck=[],players=[[],[],[]],penaltyCards=[[],[],[]],binCards=[],nextPenaltyIndex=0,currentTurn=0,leadSuit=null,lastCutSuit=null,roundTable=[],cutCard=null,gameActive=false,resolvingRound=false,timers=[],roundActors=[],roundParticipants=[];
+$("start-btn").addEventListener("click",startNewGame);
+function getCardName(val){return ({11:"J",12:"Q",13:"K",14:"A"})[val]||String(val);}
+function later(fn,ms){const id=setTimeout(()=>{timers=timers.filter(t=>t!==id);fn();},ms);timers.push(id);}
+function clearTimers(){timers.forEach(clearTimeout);timers=[];}
+function createDeck(){deck=[];for(const suit of suits)for(let val=2;val<=14;val++)deck.push({val,display:getCardName(val),suit,red:suit==="♥"||suit==="♦"});for(let i=deck.length-1;i>0;i--){let j=Math.floor(Math.random()*(i+1));[deck[i],deck[j]]=[deck[j],deck[i]];}}
+function activePlayers(){return [0,1,2].filter(p=>players[p].length>0);}
+function nextActivePlayer(after){const active=activePlayers();if(!active.length)return null;for(let n=1;n<=3;n++){const p=(after+n)%3;if(active.includes(p))return p;}return null;}
+function nextUnplayedRoundPlayer(after){if(!roundParticipants.length)return null;for(let n=1;n<=3;n++){const p=(after+n)%3;if(roundParticipants.includes(p)&&!roundActors.includes(p)&&players[p].length>0)return p;}return null;}
+function startNewGame(){
+ clearTimers();createDeck();
+ // Penalty cards remain playable cards in their owner's hand in the new game.
+ // Reserve each physical card exactly once, then deal all other cards.
+ players=penaltyCards.map(cards=>cards.map(c=>({...c})));
+ roundTable=[];roundActors=[];roundParticipants=[];leadSuit=null;lastCutSuit=null;resolvingRound=false;binCards=[];
+ const penalizedKeys=new Set(penaltyCards.flat().map(c=>`${c.display}${c.suit}`));
+ deck=deck.filter(c=>!penalizedKeys.has(`${c.display}${c.suit}`));
+ // Each penalty card causes one skipped dealing turn. Skips affect only the
+ // distribution of the remaining cards; they do not remove a card from play.
+ const skips=penaltyCards.map(cards=>cards.length);
+ let turn=0,guard=0;
+ while(deck.length && guard++<10000){
+  const p=turn%3;turn++;
+  if(skips[p]>0){skips[p]--;continue;}
+  players[p].push(deck.pop());
+ }
+ // Defensive fallback: ensure every remaining card is dealt exactly once.
+ while(deck.length){
+  const p=players.reduce((best,hand,i)=>hand.length<players[best].length?i:best,0);
+  players[p].push(deck.pop());
+ }
+ for(const hand of players)hand.sort((a,b)=>a.val-b.val);
+ let starter=players.findIndex(hand=>hand.some(c=>c.val===14&&c.suit==="♠"));
+ if(starter<0)starter=players.findIndex(hand=>hand.length>0);
+ currentTurn=starter<0?0:starter;gameActive=true;$("start-btn").style.display="none";
+ const aceIsPenalty=penaltyCards.some(cards=>cards.some(c=>c.val===14&&c.suit==="♠"));
+ $("message").textContent=aceIsPenalty
+  ?`${starter===0?"You":`CPU ${starter}`} holds the Ace of Spades and leads this game with it in their playable hand.`
+  :starter===0?"You have the Ace of Spades. Play a card to lead.":`CPU ${starter} has the Ace of Spades and leads.`;
+ renderAll();if(starter!==0)later(runCPUTurn,650);
+}
+function renderAll(){renderHand();renderTable();renderCounts();renderPenalties();}
+function renderHand(){
+ const div=$("player-hand");div.replaceChildren();
+ if(!gameActive||players[0].length===0){div.innerHTML=players[0].length===0&&gameActive?'<em class="safe">You are safe — your hand is empty.</em>':"";return;}
+ players[0].forEach((card,index)=>{const el=document.createElement("button");el.type="button";el.className="card"+(card.red?" red":"");el.setAttribute("aria-label",`${card.display} ${card.suit}`);el.innerHTML=`<span>${card.display}</span><span style="font-size:20px;text-align:center">${card.suit}</span><span style="text-align:right">${card.display}</span>`;el.addEventListener("click",()=>playerPlayCard(index));div.appendChild(el);});
+}
+function renderTable(){
+ const div=$("table-cards");div.replaceChildren();
+ if(!roundTable.length){div.innerHTML="<em>No cards played yet this round.</em>";return;}
+ roundTable.forEach(item=>{const el=document.createElement("div");el.className="card"+(item.card.red?" red":"");const who=item.playerIdx===0?"You":`CPU ${item.playerIdx}`;el.innerHTML=`<span>${item.card.display}</span><span style="font-size:18px;text-align:center">${item.card.suit}</span><span style="font-size:10px">${who}</span>`;div.appendChild(el);});
+}
+function renderCounts(){
+ for(let p=0;p<3;p++){
+  $(`p${p}-count`).textContent=players[p].length;
+  const label=$(`p${p}-count`).parentElement;
+  if(players[p].length===0)label.classList.add("safe");else label.classList.remove("safe");
+ }
+ $("bin-count").textContent=binCards.length;
+}
+function renderPenalties(){
+ const div=$("penalty-area");div.replaceChildren();
+ for(let p=0;p<3;p++){const box=document.createElement("div");box.className="penalty-player";const title=document.createElement("strong");title.textContent=p===0?"You":`CPU ${p}`;const cards=document.createElement("div");cards.className="penalty-cards";cards.textContent=penaltyCards[p].length?penaltyCards[p].map(c=>c.display+c.suit).join(" "):"No penalty cards";box.append(title,cards);div.appendChild(box);}
+}
+function playerPlayCard(index){
+ if(!gameActive||resolvingRound||currentTurn!==0||players[0].length===0)return;
+ const hand=players[0],card=hand[index];if(!card)return;
+ const isLead=leadSuit===null;
+ if(isLead)roundParticipants=activePlayers();
+ if(!isLead&&hand.some(c=>c.suit===leadSuit)&&card.suit!==leadSuit){$("message").textContent=`You must follow ${leadSuit} because you still have that suit.`;return;}
+ if(isLead){roundParticipants=activePlayers();leadSuit=card.suit;}
+ const cuts=!isLead&&card.suit!==leadSuit;
+ hand.splice(index,1);roundTable.push({playerIdx:0,card});roundActors.push(0);
+ renderAll();
+ if(hand.length===0)$("message").textContent="You have emptied your hand and are SAFE!";
+ if(cuts){resolveRound(true,0);return;}
+ if(roundTable.length>=roundParticipants.length){resolveRound(false);return;}
+ currentTurn=nextUnplayedRoundPlayer(0);
+ if(currentTurn===null){finishGame();return;}
+ if(currentTurn===0)$("message").textContent=`Your turn. Follow ${leadSuit} if you can; otherwise cut.`;
+ else later(runCPUTurn,600);
+}
+function chooseCPUCardIndex(hand,isLead){
+ // A small card-counting strategy: track suit lengths, known cards already
+ // played this round, and avoid blindly throwing the lowest card every time.
+ const suitOrder=["♠","♥","♦","♣"];
+ const countSuit=suit=>hand.filter(c=>c.suit===suit).length;
+ if(isLead){
+  // Learn from the previous cut: if the CPU collected a cut card, consider
+  // leading that cut suit next to shed it instead of blindly leading spades.
+  if(lastCutSuit && hand.some(c=>c.suit===lastCutSuit)){
+   const candidates=hand.map((c,i)=>({c,i})).filter(x=>x.c.suit===lastCutSuit);
+   candidates.sort((a,b)=>a.c.val-b.c.val);
+   return candidates[0].i;
+  }
+  // Lead from a suit with several cards so the CPU can shed that suit steadily.
+  // Prefer a middle/high card rather than automatically saving all high cards.
+  let best=0,bestScore=-Infinity;
+  hand.forEach((c,i)=>{
+   const n=countSuit(c.suit);
+   const score=n*4 + c.val*0.35 + (suitOrder.indexOf(c.suit)>=0?0.01:0);
+   if(score>bestScore){bestScore=score;best=i;}
+  });
+  return best;
+ }
+ const matching=hand.map((c,i)=>({c,i})).filter(x=>x.c.suit===leadSuit);
+ if(matching.length){
+  const highestPlayed=Math.max(...roundTable.filter(x=>x.card.suit===leadSuit).map(x=>x.card.val),-1);
+  // If another player already has a higher card, shed the smallest follower.
+  // Otherwise sometimes play a stronger card to take the lead, but don't
+  // always burn the very highest card.
+  const losing=matching.filter(x=>x.c.val<highestPlayed);
+  if(losing.length)return losing.reduce((a,b)=>a.c.val<b.c.val?a:b).i;
+  const sorted=[...matching].sort((a,b)=>a.c.val-b.c.val);
+  if(sorted.length>=3)return sorted[Math.floor((sorted.length-1)/2)].i;
+  return sorted[0].i;
+ }
+ // The CPU has no card of the lead suit: it must cut with a different suit.
+ // Use its highest off-suit card when cutting, making the CPU a tougher opponent.
+ const offSuit=hand.map((c,i)=>({c,i})).filter(x=>x.c.suit!==leadSuit);
+ if(offSuit.length){
+  return offSuit.reduce((best,x)=>{
+   const score=x.c.val;
+   return score>best.score?{...x,score}:best;
+  },{...offSuit[0],score:offSuit[0].c.val}).i;
+ }
+ return 0;
+}
+function runCPUTurn(){
+ if(!gameActive||resolvingRound||currentTurn===0||currentTurn===null)return;
+ if(players[currentTurn].length===0){currentTurn=nextActivePlayer(currentTurn);if(currentTurn===0)return;later(runCPUTurn,250);return;}
+ const hand=players[currentTurn],isLead=leadSuit===null;
+ const chosen=chooseCPUCardIndex(hand,isLead);
+ if(isLead){roundParticipants=activePlayers();leadSuit=hand[chosen].suit;}
+ const card=hand.splice(chosen,1)[0],actor=currentTurn,cuts=!isLead&&card.suit!==leadSuit;
+ roundTable.push({playerIdx:actor,card});roundActors.push(actor);currentTurn=nextUnplayedRoundPlayer(actor);
+ renderAll();
+ if(hand.length===0)$("message").textContent=`CPU ${actor} emptied its hand and is SAFE!`;
+ if(cuts){$("message").textContent=`CPU ${actor} has no ${leadSuit} card and cuts with ${card.display}${card.suit}. The round stops immediately.`;resolveRound(true,actor);return;}
+ if(roundTable.length>=roundParticipants.length){resolveRound(false);return;}
+ if(currentTurn===0)$("message").textContent="Your turn. Follow the lead suit if you can.";
+ else later(runCPUTurn,600);
+}
+function resolveRound(wasCut=false,cutter=null){
+ if(resolvingRound||!gameActive)return;
+ if(!roundTable.length){finishGame();return;}
+ resolvingRound=true;
+ let highest=-1,winner=roundTable[0].playerIdx;
+ for(const item of roundTable)if(item.card.suit===leadSuit&&item.card.val>highest){highest=item.card.val;winner=item.playerIdx;}
+ const pickedUpCutCard=cutCard?{...cutCard}:null;
+ const winnerName=winner===0?"You":`CPU ${winner}`;
+ // If every player played the same rank, discard all played cards to the bin.
+ const allSameCardSuit=roundTable.length>1&&roundTable.every(item=>item.card.suit===roundTable[0].card.suit);
+ // When a player cuts, the highest card of the lead suit wins the trick
+ // and collects exactly the cards played in this round, including the
+ // player's off-suit cut card. The undealt reserve cutCard is NOT in the trick.
+ if(wasCut){
+  const trickCards=roundTable.map(item=>({...item.card}));
+  const cutPlay=roundTable.find(item=>item.playerIdx===cutter);
+  if(cutPlay)lastCutSuit=cutPlay.card.suit;
+  players[winner].push(...trickCards);
+  players[winner].sort((a,b)=>a.val-b.val);
+ }
+ if(allSameCardSuit&&!wasCut){
+  binCards.push(...roundTable.map(item=>({...item.card})));
+  $("message").textContent=`All players played the same suit (${roundTable[0].card.suit}). Those played cards go to the bin; nobody collects them.`;
+ }else{
+  $("message").textContent=wasCut
+   ?`Round cut${cutter!==null?` by ${cutter===0?"you":`CPU ${cutter}`}`:""}! ${winnerName} takes all ${roundTable.length} cards played, including the cut card.`
+   :`${winnerName} wins the round. No cards are added to any hand.`;
+ }
+ renderAll();
+ later(()=>{
+  roundTable=[];roundActors=[];roundParticipants=[];leadSuit=null;resolvingRound=false;renderAll();
+  const active=activePlayers();
+  if(active.length<=1){finishGame();return;}
+  currentTurn=players[winner].length>0?winner:active[0];
+  if(currentTurn===0)$("message").textContent="Your turn to lead the next round.";
+  else{$("message").textContent=`CPU ${currentTurn} leads the next round...`;later(runCPUTurn,600);}
+ },1600);
+}
+function finishGame(){
+ if(!gameActive)return;
+ clearTimers();gameActive=false;resolvingRound=false;
+ const active=activePlayers();
+ if(active.length===1){
+  const loser=active[0];
+  // An escaping player's oldest queued penalty is transferred to the latest loser.
+  const transferred=[];
+  for(let p=0;p<3;p++){
+   if(p!==loser&&penaltyCards[p].length>0)transferred.push(penaltyCards[p].shift());
+  }
+  penaltyCards[loser].push(...transferred);
+  // The latest loser also receives the next card in the global penalty sequence.
+  const penalty=penaltySequence[nextPenaltyIndex]||null;
+  if(penalty){penaltyCards[loser].push({...penalty});nextPenaltyIndex++;}
+  const loserName=loser===0?"You":`CPU ${loser}`;
+  const transferredText=transferred.length
+   ?` Transferred penalty(s) ${transferred.map(c=>c.display+c.suit).join(", ")} from players who escaped to ${loserName}.`
+   :"";
+  $("message").textContent=penalty
+   ?`Game over! ${loserName} is the last player standing and LOSES, receiving ${penalty.display}${penalty.suit}.${transferredText}`
+   :`Game over! ${loserName} is the last player standing and LOSES. The penalty sequence is complete.${transferredText}`;
+ }else{
+  // If there is no single loser, players who escaped clear one queued penalty.
+  for(let p=0;p<3;p++)if(players[p].length===0&&penaltyCards[p].length>0)penaltyCards[p].shift();
+  $("message").textContent="Game over! No single last player was left. A safe player transfers their oldest queued penalty to the latest loser.";
+ }
+ $("start-btn").style.display="inline-block";$("start-btn").textContent="Start Next Game";
+ renderAll();
+}
+</script>
+</body>
+</html>
